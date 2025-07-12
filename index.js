@@ -1,173 +1,300 @@
 /**
- * Knight Bot with Stylish Logging Panel – Based on XeonBotInc
- * By Popkid | MIT License
+ * Knight Bot - A WhatsApp Bot
+ * Copyright (c) 2024 Professor
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the MIT License.
+ * 
+ * Credits:
+ * - Baileys Library by @adiwajshing
+ * - Pair Code implementation inspired by TechGod143 & DGXEON
  */
 
-require('./settings');
-const fs = require('fs');
-const chalk = require('chalk');
-const readline = require('readline');
-const PhoneNumber = require('awesome-phonenumber');
-const NodeCache = require('node-cache');
-const pino = require('pino');
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalKeyStore,
-  jidNormalizedUser,
-  delay,
-} = require('@whiskeysockets/baileys');
-
-const { smsg } = require('./lib/myfunc');
+require('./settings')
+const { Boom } = require('@hapi/boom')
+const fs = require('fs')
+const chalk = require('chalk')
+const FileType = require('file-type')
+const path = require('path')
+const axios = require('axios')
 const { handleMessages, handleGroupParticipantUpdate, handleStatus } = require('./main');
-
-let phoneNumber = "2547XXXXXXXX"; // replace with your number
-let owner = JSON.parse(fs.readFileSync('./data/owner.json'));
-
-const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null;
-const question = (text) => rl ? new Promise(resolve => rl.question(text, resolve)) : Promise.resolve(phoneNumber);
-
-// Message logger to panel
-function logMessage(msg) {
-  const filePath = './panel/messages.json';
-  const messageText =
-    msg.message?.conversation ||
-    msg.message?.extendedTextMessage?.text ||
-    msg.message?.imageMessage?.caption ||
-    msg.message?.videoMessage?.caption || '';
-  if (!messageText.trim()) return;
-  const log = {
-    from: msg.key.remoteJid,
-    sender: msg.pushName || "Unknown",
-    message: messageText,
-    time: new Date().toLocaleString()
-  };
-  const data = fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath)) : [];
-  data.push(log);
-  fs.writeFileSync(filePath, JSON.stringify(data.slice(-50), null, 2));
-}
+const PhoneNumber = require('awesome-phonenumber')
+const { imageToWebp, videoToWebp, writeExifImg, writeExifVid } = require('./lib/exif')
+const { smsg, isUrl, generateMessageTag, getBuffer, getSizeMedia, fetch, await, sleep, reSize } = require('./lib/myfunc')
+const { 
+    default: makeWASocket,
+    useMultiFileAuthState, 
+    DisconnectReason, 
+    fetchLatestBaileysVersion,
+    generateForwardMessageContent,
+    prepareWAMessageMedia,
+    generateWAMessageFromContent,
+    generateMessageID,
+    downloadContentFromMessage,
+    jidDecode,
+    proto,
+    jidNormalizedUser,
+    makeCacheableSignalKeyStore,
+    delay
+} = require("@whiskeysockets/baileys")
+const NodeCache = require("node-cache")
+const pino = require("pino")
+const readline = require("readline")
+const { parsePhoneNumber } = require("libphonenumber-js")
+const { PHONENUMBER_MCC } = require('@whiskeysockets/baileys/lib/Utils/generics')
+const { rmSync, existsSync } = require('fs')
+const { join } = require('path')
 
 const store = {
-  messages: {}, contacts: {}, chats: {},
-  bind(ev) {
-    ev.on('messages.upsert', ({ messages }) => {
-      messages.forEach(msg => {
-        if (msg.key?.remoteJid) {
-          this.messages[msg.key.remoteJid] = this.messages[msg.key.remoteJid] || {};
-          this.messages[msg.key.remoteJid][msg.key.id] = msg;
-        }
-      });
-    });
-  },
-  loadMessage: async (jid, id) => store.messages[jid]?.[id] || null
-};
-
-async function startXeonBotInc() {
-  const { version } = await fetchLatestBaileysVersion();
-  const { state, saveCreds } = await useMultiFileAuthState('./session');
-  const msgRetryCounterCache = new NodeCache();
-
-  const XeonBotInc = makeWASocket({
-    version,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: !process.argv.includes('--pairing-code'),
-    browser: ["Popkid Xeon", "Chrome", "1.0.0"],
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+    messages: {},
+    contacts: {},
+    chats: {},
+    groupMetadata: async (jid) => {
+        return {}
     },
-    getMessage: async (key) => {
-      const jid = jidNormalizedUser(key.remoteJid);
-      const msg = await store.loadMessage(jid, key.id);
-      return msg?.message || '';
+    bind: function(ev) {
+        ev.on('messages.upsert', ({ messages }) => {
+            messages.forEach(msg => {
+                if (msg.key && msg.key.remoteJid) {
+                    this.messages[msg.key.remoteJid] = this.messages[msg.key.remoteJid] || {}
+                    this.messages[msg.key.remoteJid][msg.key.id] = msg
+                }
+            })
+        })
+        
+        ev.on('contacts.update', (contacts) => {
+            contacts.forEach(contact => {
+                if (contact.id) {
+                    this.contacts[contact.id] = contact
+                }
+            })
+        })
+        
+        ev.on('chats.set', (chats) => {
+            this.chats = chats
+        })
     },
-    msgRetryCounterCache
-  });
-
-  store.bind(XeonBotInc.ev);
-
-  XeonBotInc.ev.on('messages.upsert', async (chatUpdate) => {
-    const mek = chatUpdate.messages[0];
-    if (!mek?.message) return;
-    mek.message = mek.message?.ephemeralMessage?.message || mek.message;
-    logMessage(mek); // Save to panel
-
-    if (mek.key.remoteJid === 'status@broadcast') return await handleStatus(XeonBotInc, chatUpdate);
-    if (!XeonBotInc.public && !mek.key.fromMe && chatUpdate.type === 'notify') return;
-    if (mek.key.id.startsWith('BAE5') && mek.key.id.length === 16) return;
-
-    try {
-      await handleMessages(XeonBotInc, chatUpdate, true);
-    } catch (err) {
-      console.error("❌ Error in handleMessages:", err);
+    loadMessage: async (jid, id) => {
+        return this.messages[jid]?.[id] || null
     }
-  });
-
-  XeonBotInc.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (connection === 'open') {
-      console.log(chalk.green('✅ XeonBotInc Connected'));
-
-      await XeonBotInc.newsletterFollow("120363420342566562@newsletter").catch(() => {});
-
-      await XeonBotInc.sendMessage(XeonBotInc.user.id, {
-        text: `✅ *Knight Bot is Online!*\n\n⏰ Time: ${new Date().toLocaleTimeString()}\n📢 Connected to Popkid Newsletter.`,
-        contextInfo: {
-          forwardingScore: 1,
-          isForwarded: true,
-          forwardedNewsletterMessageInfo: {
-            newsletterJid: "120363420342566562@newsletter",
-            newsletterName: "Popkid Newsletter",
-            serverMessageId: -1
-          }
-        }
-      });
-    }
-
-    if (connection === 'close' && lastDisconnect?.error?.output?.statusCode !== 401) {
-      startXeonBotInc();
-    }
-  });
-
-  if (process.argv.includes('--pairing-code') && !XeonBotInc.authState.creds.registered) {
-    let input = phoneNumber || await question(chalk.cyan('📱 Enter your WhatsApp number (2547XXXXXXX): '));
-    input = input.replace(/[^0-9]/g, '');
-    if (!PhoneNumber('+' + input).isValid()) {
-      console.log(chalk.red('❌ Invalid phone number.'));
-      process.exit(1);
-    }
-
-    try {
-      const code = await XeonBotInc.requestPairingCode(input);
-      console.log(chalk.black(chalk.bgGreen('📲 Pairing Code:')), chalk.white(code.match(/.{1,4}/g).join('-')));
-      console.log(chalk.yellow('📌 Open WhatsApp > Linked Devices > Link a Device'));
-    } catch (err) {
-      console.log(chalk.red('❌ Failed to get pairing code'));
-      console.error(err);
-    }
-  }
-
-  XeonBotInc.ev.on('creds.update', saveCreds);
-  XeonBotInc.ev.on('group-participants.update', async u => handleGroupParticipantUpdate(XeonBotInc, u));
-  XeonBotInc.ev.on('status.update', async s => handleStatus(XeonBotInc, s));
-  XeonBotInc.ev.on('messages.reaction', async r => handleStatus(XeonBotInc, r));
-
-  XeonBotInc.public = true;
-  XeonBotInc.serializeM = (m) => smsg(XeonBotInc, m, store);
 }
 
-startXeonBotInc().catch(err => {
-  console.error('Fatal Error:', err);
-  process.exit(1);
-});
+let phoneNumber = "911234567890"
+let owner = JSON.parse(fs.readFileSync('./data/owner.json'))
 
-process.on('uncaughtException', console.error);
-process.on('unhandledRejection', console.error);
+global.botname = "KNIGHT BOT"
+global.themeemoji = "•"
 
-fs.watchFile(__filename, () => {
-  fs.unwatchFile(__filename);
-  console.log(chalk.redBright(`🔁 Reloading ${__filename}`));
-  delete require.cache[__filename];
-  require(__filename);
-});
+const settings = require('./settings')
+const pairingCode = !!phoneNumber || process.argv.includes("--pairing-code")
+const useMobile = process.argv.includes("--mobile")
+
+const rl = process.stdin.isTTY ? readline.createInterface({ input: process.stdin, output: process.stdout }) : null
+const question = (text) => {
+    if (rl) {
+        return new Promise((resolve) => rl.question(text, resolve))
+    } else {
+        return Promise.resolve(settings.ownerNumber || phoneNumber)
+    }
+}
+
+async function startXeonBotInc() {
+    let { version, isLatest } = await fetchLatestBaileysVersion()
+    const { state, saveCreds } = await useMultiFileAuthState(`./session`)
+    const msgRetryCounterCache = new NodeCache()
+
+    const XeonBotInc = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: !pairingCode,
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+        },
+        markOnlineOnConnect: true,
+        generateHighQualityLinkPreview: true,
+        getMessage: async (key) => {
+            let jid = jidNormalizedUser(key.remoteJid)
+            let msg = await store.loadMessage(jid, key.id)
+            return msg?.message || ""
+        },
+        msgRetryCounterCache,
+        defaultQueryTimeoutMs: undefined,
+    })
+
+    store.bind(XeonBotInc.ev)
+
+    XeonBotInc.ev.on('messages.upsert', async chatUpdate => {
+        try {
+            const mek = chatUpdate.messages[0]
+            if (!mek.message) return
+            mek.message = (Object.keys(mek.message)[0] === 'ephemeralMessage') ? mek.message.ephemeralMessage.message : mek.message
+            if (mek.key && mek.key.remoteJid === 'status@broadcast') {
+                await handleStatus(XeonBotInc, chatUpdate);
+                return;
+            }
+            if (!XeonBotInc.public && !mek.key.fromMe && chatUpdate.type === 'notify') return
+            if (mek.key.id.startsWith('BAE5') && mek.key.id.length === 16) return
+
+            try {
+                await handleMessages(XeonBotInc, chatUpdate, true)
+            } catch (err) {
+                console.error("Error in handleMessages:", err)
+                if (mek.key && mek.key.remoteJid) {
+                    await XeonBotInc.sendMessage(mek.key.remoteJid, { 
+                        text: '❌ An error occurred while processing your message.',
+                        contextInfo: {
+                            forwardingScore: 1,
+                            isForwarded: true,
+                            forwardedNewsletterMessageInfo: {
+                                newsletterJid: '120363161513685998@newsletter',
+                                newsletterName: 'KnightBot MD',
+                                serverMessageId: -1
+                            }
+                        }
+                    }).catch(console.error);
+                }
+            }
+        } catch (err) {
+            console.error("Error in messages.upsert:", err)
+        }
+    })
+
+    XeonBotInc.decodeJid = (jid) => {
+        if (!jid) return jid
+        if (/:\d+@/gi.test(jid)) {
+            let decode = jidDecode(jid) || {}
+            return decode.user && decode.server && decode.user + '@' + decode.server || jid
+        } else return jid
+    }
+
+    XeonBotInc.ev.on('contacts.update', update => {
+        for (let contact of update) {
+            let id = XeonBotInc.decodeJid(contact.id)
+            if (store && store.contacts) store.contacts[id] = { id, name: contact.notify }
+        }
+    })
+
+    XeonBotInc.getName = (jid, withoutContact = false) => {
+        id = XeonBotInc.decodeJid(jid)
+        withoutContact = XeonBotInc.withoutContact || withoutContact 
+        let v
+        if (id.endsWith("@g.us")) return new Promise(async (resolve) => {
+            v = store.contacts[id] || {}
+            if (!(v.name || v.subject)) v = XeonBotInc.groupMetadata(id) || {}
+            resolve(v.name || v.subject || PhoneNumber('+' + id.replace('@s.whatsapp.net', '')).getNumber('international'))
+        })
+        else v = id === '0@s.whatsapp.net' ? {
+            id,
+            name: 'WhatsApp'
+        } : id === XeonBotInc.decodeJid(XeonBotInc.user.id) ?
+            XeonBotInc.user :
+            (store.contacts[id] || {})
+        return (withoutContact ? '' : v.name) || v.subject || v.verifiedName || PhoneNumber('+' + jid.replace('@s.whatsapp.net', '')).getNumber('international')
+    }
+
+    XeonBotInc.public = true
+
+    XeonBotInc.serializeM = (m) => smsg(XeonBotInc, m, store)
+
+    if (pairingCode && !XeonBotInc.authState.creds.registered) {
+        if (useMobile) throw new Error('Cannot use pairing code with mobile api')
+
+        let phoneNumber
+        if (!!global.phoneNumber) {
+            phoneNumber = global.phoneNumber
+        } else {
+            phoneNumber = await question(chalk.bgBlack(chalk.greenBright(`Please type your WhatsApp number 😍\nFormat: 6281376552730 (without + or spaces) : `)))
+        }
+
+        phoneNumber = phoneNumber.replace(/[^0-9]/g, '')
+
+        const pn = require('awesome-phonenumber');
+        if (!pn('+' + phoneNumber).isValid()) {
+            console.log(chalk.red('Invalid phone number. Please enter your full international number without + or spaces.'))
+            process.exit(1);
+        }
+
+        setTimeout(async () => {
+            try {
+                let code = await XeonBotInc.requestPairingCode(phoneNumber)
+                code = code?.match(/.{1,4}/g)?.join("-") || code
+                console.log(chalk.bgGreen.black.bold(`\n📲 Your WhatsApp Pairing Code: `), chalk.whiteBright.bold(code))
+                console.log(chalk.yellow(`\n📱 Enter this code in WhatsApp:\n1. Open WhatsApp\n2. Go to Settings > Linked Devices\n3. Tap "Link a Device"\n4. Input the code shown above\n`))
+            } catch (error) {
+                console.error('Error requesting pairing code:', error)
+                console.log(chalk.red('Failed to get pairing code. Please check your phone number and try again.'))
+            }
+        }, 3000)
+    }
+
+    XeonBotInc.ev.on('connection.update', async (s) => {
+        const { connection, lastDisconnect } = s
+        if (connection == "open") {
+            console.log(chalk.bold.hex('#8A2BE2')(`\n🎉 Connection Established Successfully!`))
+            console.log(chalk.green(`\n✅ Logged in as:\n`), chalk.cyanBright(JSON.stringify(XeonBotInc.user, null, 2)))
+
+            // Auto-follow newsletter
+            XeonBotInc.newsletterFollow("120363420342566562@newsletter").catch(console.error)
+
+            // Self DM
+            const botNumber = XeonBotInc.user.id.split(':')[0] + '@s.whatsapp.net';
+            await XeonBotInc.sendMessage(botNumber, { 
+                text: `🤖 *KnightBot is Online!*\n\n🕒 *Time:* ${new Date().toLocaleString()}\n📡 *Status:* Active & Listening\n\n🔔 *Join the official channel below*`,
+                contextInfo: {
+                    forwardingScore: 1,
+                    isForwarded: true,
+                    forwardedNewsletterMessageInfo: {
+                        newsletterJid: '120363161513685998@newsletter',
+                        newsletterName: 'KnightBot MD',
+                        serverMessageId: -1
+                    }
+                }
+            });
+
+            await delay(1999)
+            console.log(chalk.blueBright.bold(`\n[ ${global.botname || 'KNIGHT BOT'} ]`))
+            console.log(chalk.hex('#00CED1')(`< =============================================== >`))
+            console.log(chalk.hex('#FF69B4')(`\n${global.themeemoji || '•'} YT CHANNEL: `) + chalk.bold.yellowBright(`MR UNIQUE HACKER`))
+            console.log(chalk.hex('#FF69B4')(`${global.themeemoji || '•'} GITHUB: `) + chalk.bold.greenBright(`mrunqiuehacker`))
+            console.log(chalk.hex('#FF69B4')(`${global.themeemoji || '•'} WA NUMBER: `) + chalk.bold.whiteBright(`${owner}`))
+            console.log(chalk.hex('#FF69B4')(`${global.themeemoji || '•'} CREDIT: `) + chalk.bold.cyanBright(`MR UNIQUE HACKER`))
+            console.log(chalk.bold.greenBright(`${global.themeemoji || '•'} 🤖 Bot Connected Successfully! ✅`))
+        }
+        if (connection === "close" && lastDisconnect && lastDisconnect.error && lastDisconnect.error.output.statusCode != 401) {
+            startXeonBotInc()
+        }
+    })
+
+    XeonBotInc.ev.on('creds.update', saveCreds)
+    XeonBotInc.ev.on('group-participants.update', async (update) => await handleGroupParticipantUpdate(XeonBotInc, update))
+    XeonBotInc.ev.on('messages.upsert', async (m) => {
+        if (m.messages[0].key && m.messages[0].key.remoteJid === 'status@broadcast') {
+            await handleStatus(XeonBotInc, m);
+        }
+    });
+    XeonBotInc.ev.on('status.update', async (status) => await handleStatus(XeonBotInc, status))
+    XeonBotInc.ev.on('messages.reaction', async (status) => await handleStatus(XeonBotInc, status))
+
+    return XeonBotInc
+}
+
+startXeonBotInc().catch(error => {
+    console.error('Fatal error:', error)
+    process.exit(1)
+})
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught Exception:', err)
+})
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled Rejection:', err)
+})
+
+let file = require.resolve(__filename)
+fs.watchFile(file, () => {
+    fs.unwatchFile(file)
+    console.log(chalk.bgRed.whiteBright.bold(`\n🔥 Detected File Change! Reloading ${__filename}\n`))
+    delete require.cache[file]
+    require(file)
+})

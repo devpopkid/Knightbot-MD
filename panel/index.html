@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Popkid WhatsApp Panel</title>
+  <style>
+    body {
+      font-family: 'Courier New', monospace;
+      background-color: #0f0f0f;
+      color: #0f0;
+      padding: 20px;
+    }
+    .msg {
+      border: 1px solid #0f0;
+      border-radius: 6px;
+      padding: 10px;
+      margin: 10px 0;
+      background: #1a1a1a;
+      box-shadow: 0 0 5px #0f0a;
+    }
+    .msg b {
+      color: #00ffff;
+    }
+    .time {
+      color: #ccc;
+      font-size: 12px;
+    }
+    h2 {
+      text-align: center;
+      color: #00ffcc;
+    }
+  </style>
+</head>
+<body>
+  <h2>📲 Popkid WhatsApp Message Panel</h2>
+  <div id="messages">Loading...</div>
+
+  <script>
+    async function loadMessages() {
+      const res = await fetch('/messages');
+      const data = await res.json();
+      const box = document.getElementById('messages');
+      box.innerHTML = data.reverse().map(msg => `
+        <div class="msg">
+          <b>${msg.sender}</b> <span class="time">(${msg.time})</span><br>
+          ${msg.message}
+        </div>
+      `).join('');
+    }
+
+    setInterval(loadMessages, 3000);
+    loadMessages();
+  </script>
+</body>
+</html>
